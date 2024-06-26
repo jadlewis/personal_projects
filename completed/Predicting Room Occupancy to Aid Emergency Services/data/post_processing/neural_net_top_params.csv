@@ -1,0 +1,6 @@
+,feature_shape,layer1_units,layer2,layer2_units,layer3,layer3_units,layer4,layer4_units,dropout,optimizer,learning_rate,loss_fn,avg_f1
+1191,16,64,True,4,True,128,False,4,False,SGD,0.001,categorical_crossentropy,0.9583762696779186
+528,16,8,True,32,False,4,False,4,False,Adam,0.001,categorical_crossentropy,0.9790628159926273
+575,16,8,True,32,True,32,False,4,True,SGD,0.1,categorical_crossentropy,0.9711373505629659
+1287,16,64,True,32,True,4,False,4,False,SGD,0.001,categorical_crossentropy,0.9763239405587842
+820,16,32,True,4,True,128,False,4,False,SGD,0.01,categorical_crossentropy,0.9773008469323985

@@ -1,0 +1,375 @@
+---
+title: "Estimating the Impact of Airport Pickups on Driver Pay"
+author: "Andrew McCall, Arwin Rahmatpanah, Dylan Fletcher, and Jordan Lewis " 
+output:
+  bookdown::pdf_document2: 
+    toc: true
+    number_sections: true
+---
+
+\newpage
+\setcounter{page}{1}
+
+
+```{r load packages and set options, include=FALSE}
+library(tidyverse) 
+library(knitr)
+library(stats)
+library(stargazer)
+library(moments)
+library(sandwich)
+library(lmtest)
+library(magrittr)
+library(car)
+library(rmarkdown)
+library(corrplot)
+library(scattermore)
+
+theme_set(theme_bw())
+
+options(tinytex.verbose = TRUE)
+knitr::opts_chunk$set(echo=FALSE, message=FALSE)
+```
+
+```{r load and clean test data}
+lab_2_folder <- function(file) {
+  return(paste0('~/concept_checks/Lab_02/',file))
+}
+
+trips_small = read.csv(lab_2_folder('cleaned_sample_data.csv')) %>% select(-X)
+
+# Transformations
+trips_small = trips_small %>%
+                mutate(trip_time = trip_time/60) %>%
+                mutate(wait_time = wait_time/60) %>%
+                mutate(pay_per_min = total_pay/(trip_time))
+
+```
+
+
+# Introduction
+
+In the third quarter of 2022, Uber drivers completed 1.95 billion trips^[Huang, Kalley. “Uber’s Revenue Is Up 72 Percent From Last Year, but It Posts a Loss.” The New York Times, 1 Nov. 2022, https://www.nytimes.com/2022/11/01/technology/uber-revenue.html?searchResultPosition=1]. A concern for drivers and rideshare companies alike is how to maximize the amount of revenue generated from each of these trips. There have been studies showing that drivers in Seattle made over \$23 per hour after expenses while other areas had put net earnings well below \$20 per hour. Another new study put the figure at less than half that^[Scheiber, Noam. “When Scholars Collaborate With Tech Companies, How Reliable Are the Findings?” The New York Times, 12 July 2020, https://www.nytimes.com/2020/07/12/business/economy/uber-lyft-drivers-wages.html].
+
+With so many conflicting reports, it can be a challenge for drivers and rideshare companies to understand what the normal rate of compensation is and how they can increase their take home pay. Without a clear understanding of what types of trips lead to increased pay, many drivers commit to completing trips that lock them into a lower rate that might be earned elsewhere.
+
+Our study aims to understand whether certain trips, specifically those originating at airports, lead to increased compensation for drivers. We utilize trip record data provided by the New York City Taxi and Limousine Commission (TLC). The data show trip timing (pickup, dropoff, duration, etc.), location (e.g. borough, airport, etc.), rideshare company (e.g. Uber, Lyft, etc.) and pay (base driver pay, tips, etc.). Using a regression model we estimate the relationship between driver pay and location of pickup (airport vs non-airport).
+
+
+
+# Data and Conceptualization
+
+The data analyzed for this study comes from the TLC which is publicly available online^[“TLC Trip Record Data.” NYC Taxi & Limousine Commission, https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page]. This data is collected using technology installed in taxis and from high-volume for hire vehicle (HVFHV) providers, such as Lyft and Uber. While the TLC recognizes that taxi data is reliant on the accuracy of the systems used and completeness of the provided data from dispatchers, we can assume that the data from the HVFHV is much more complete as the collected data is central to their operation. This study focuses on the HVFHV data for Uber and Lyft collected in June 2022. This decision was made as it is the most recent data before a change was made that allows drivers to reject trips based on the destination and could skew results^[Capoot, Ashley. “Uber Unveils New Features, Including One That Lets Drivers Choose the Trips They 
+Want.” CNBC, CNBC, 29 July 2022, https://www.cnbc.com/2022/07/29/uber-will-let-drivers-choose-the-trips-they-want-to-take.html].
+
+In total there are over 17 million observations. Due to system constraints the analysis focuses on a random sample of 1 million observations of HVFHV trips. The dataset provides a pick-up and drop-off location variable which allows us to focus on the La-Guardia and JFK Airports to compare against all other trip locations. Newark airport is included for drop-offs only as it is not located in NYC so the data is not collected for pick-ups. For drivers to conduct an airport pickup, they must enter a special airport queue, meanwhile for non-airport trips, drivers are told to go elsewhere for pickups. We created a flag for whether a trip is an airport pickup or not. Additionally, we are not using total driver pay in insolation, rather we are including tips in the total compensation. Tips have a significant impact on compensation, and can be dependent on length of trip. Additional variables that will be examined are trip duration (in minutes), wait duration before pick up (in minutes), time of day for the trip.
+
+```{r summary-table, message=FALSE, echo=FALSE, results='asis' }
+summary_data = trips_small %>%
+                  select(total_pay, trip_time, pay_per_min, wait_time, airport_pickup) %>%
+                  rename('Driver Pay ($)' = total_pay, 'Trip Duration (m)' = trip_time, 'Pay per Minute ($/m)' = pay_per_min, 'Wait Duration (m)' = wait_time)
+
+stargazer(subset(summary_data[c('Driver Pay ($)', 'Trip Duration (m)', 'Pay per Minute ($/m)', 'Wait Duration (m)')],
+                 summary_data$airport_pickup == TRUE),
+                 title="Airport Pickup Trips", type = "latex", digits=1, header = FALSE)
+
+stargazer(subset(summary_data[c('Driver Pay ($)', 'Trip Duration (m)', 'Pay per Minute ($/m)', 'Wait Duration (m)')],
+                 summary_data$airport_pickup == FALSE),
+                 title="Non-Airport Pickup Trips", type = "latex", digits=1, header = FALSE)
+```
+
+The tables above summarize the numerical variables between airport pickup trips and non-airport pickup trips. Airport pickup trips occur much less frequently, around 4% of total trips. However, airport pickups are generally longer in trip duration, wait duration, and have higher driver pay. Importantly, the driver pay per minute is also higher for airport pickup trips, \$1.30 vs. \$1.10 This difference is statistically significant based on an unpaired two-sample t-test and provides initial evidence that airport pickup trips pay drivers more.. 
+
+We operationalize additional variables for rideshare company and trip time of day which both appear relevant to driver compensation. The graph below shows how the average driver pay for a trip predictably increases and decreases throughout the day. We created a flag to indicate where each ride landed on a spectrum of selections including: early morning, morning, midday, afternoon, evening and late evening. In addition, Uber drivers seem to make consistently more than Lyft drivers
+
+
+```{r hour and company graph, fig.width=6, fig.height=2.25}
+
+rm(summary_data)
+
+hour_company_tab = trips_small %>%
+  group_by(pickup_hour, company) %>%
+  summarize(count = n(), avg_pay = mean(total_pay)) %>%
+  ungroup() %>%
+  mutate(pickup_hour = as.factor(pickup_hour)) %>%
+  mutate(company = factor(company, levels = c("Uber","Lyft")))
+
+hour_company_tab %>%  ggplot(aes(x=pickup_hour,y=avg_pay, group = company)) + 
+  geom_line(aes(color=company)) +
+  geom_point(aes(color=company)) + 
+  scale_color_manual(values=c('#000000','#FF00BF')) +
+  labs(title="Average Driver Pay for High-Volume FHV Rides in June 2022", 
+       x="Hour", y = "Average Driver Pay ($)") +
+  theme_bw()
+
+
+
+```
+
+
+
+# Model and Modeling Decisions
+
+We have specified the model below to estimate the premium that drivers can receive from picking up passengers at an airport as opposed to regular trips. We hypothesize that driver compensation will be higher on airport pickups because travelers have more inelastic demand and are more likely to tip their drivers. 
+
+$$
+  \widehat{ln(driver \text{ } pay)}=\beta_0 + \beta_1 \cdot airport \text{ } pickup + \beta_2 \cdot ln(trip \text{ } duration) + \beta_3 \cdot ln(wait \text{ } duration) + \beta_4 \cdot congestion \text{ } zone + \beta_5 \cdot Uber + \mathbf{T\gamma}
+$$
+
+In our model, $airport pickup$ is a boolean variable and the coefficient $\beta_1$ represents the additional premium that a driver receives for making an airport pickup. $\beta_2$ and $\beta_3$ are both expected to be positive because the more time a trip lasts or time a driver spends picking up a passenger, the more the driver will be compensated. The $congestion zone$ is a boolean variable denoting if the trip occurred in the city’s congestion zone in lower Manhattan. $Uber$ is also a boolean variable denoting if the trip was for Uber or Lyft, the only two operators. Finally, $\mathbf{T}$ is a vector of indicator variables for the different periods of day and $\gamma$ is a column vector of coefficients.
+We decided to log the driver pay, trip time, and wait time for two reasons. The first reason is that all three fields have large outlier values that may generate large residuals. So by logging the fields, we can de-emphasize the importance of outliers and maintain a more constant error variance. The second reason is that coefficients from a log-log model will be more generalizable to drivers. The effect of increasing trip time or wait time to increase pay is relative. Increasing trip duration from 10 minutes to 20 minutes is very different from increasing trip duration from 1 hour 50 minutes to 2 hours. We think our results will be more useful to drivers expressed as percentages.
+
+# Results
+Table 3, below, shows the results for three different regressions run on the data. All variables were highly statistically significant across each of the models. To describe the various indicator variables in our model, we use the Halvorsen-Palmquist correction for dummy variables in a logarithmic equation. This equation states that the percent change in the outcome is described by the following:
+
+$$
+  \triangle y = 100* (e^{\beta_i}-1)
+$$
+
+```{r load and clean confirm data, message = FALSE, include=FALSE, warning=FALSE}
+rm(trips_small)
+gc()
+trips_confirm = read.csv(lab_2_folder('cleaned_confirm_data.csv')) %>% select(-X)
+
+# Add regression flags
+trips_confirm = trips_confirm %>%
+                mutate(trip_time = trip_time/60) %>%
+                mutate(wait_time = wait_time/60) %>%
+                mutate(pay_per_min = total_pay/(trip_time)) %>%
+                mutate(uber = ifelse(company == "Uber", 1,0)) %>%
+                mutate(congestion_flag = ifelse(congestion_surcharge > 0,1,0)) %>%
+                mutate(tod_early_morning = ifelse(time_of_day == "early_morning",1,0)) %>%
+                mutate(tod_morning = ifelse(time_of_day == "morning",1,0)) %>%
+                mutate(tod_midday = ifelse(time_of_day == "midday",1,0)) %>%
+                mutate(tod_afternoon = ifelse(time_of_day == "afternoon",1,0)) %>%
+                mutate(tod_evening = ifelse(time_of_day == "evening",1,0)) %>%
+                mutate(tod_late_night = ifelse(time_of_day == "late_night",1,0)) %>%
+                select(-c(time_of_day)) 
+
+# Transform numeric variables
+trips_confirm = trips_confirm %>%
+                mutate(ln_total_pay = log(total_pay)) %>%
+                mutate(ln_trip_time = log(trip_time)) %>%
+                mutate(ln_trip_miles = log(trip_miles)) %>%
+                mutate(ln_wait_time = log(wait_time))
+
+```
+
+
+```{r fit models, message = FALSE, include=FALSE, warning=FALSE}
+m_minimal  <- trips_confirm %$% 
+  lm(ln_total_pay ~ airport_pickup)
+
+se_minimal <- m_minimal %>% 
+  vcovHC(type = "HC1") %>% 
+  diag() %>% 
+  sqrt()
+
+gc()
+
+m_medium <- trips_confirm %$% 
+  lm(ln_total_pay ~ airport_pickup + ln_trip_time + ln_wait_time)
+
+se_medium <- m_medium %>% 
+  vcovHC(type = "HC1") %>% 
+  diag() %>% 
+  sqrt()
+
+gc()
+
+m_large <- trips_confirm %$% 
+  lm(ln_total_pay ~ airport_pickup + ln_trip_time + ln_wait_time + uber + congestion_flag +
+                  tod_early_morning + tod_morning + tod_midday + tod_afternoon + tod_evening)
+
+se_large <- m_large %>% 
+  vcovHC(type = "HC1") %>% 
+  diag() %>% 
+  sqrt()
+
+```
+
+```{r display regression table, message=FALSE, echo=FALSE, results='asis'}
+
+stargazer(
+  m_minimal, m_medium, m_large, 
+  type = 'latex', 
+  se = list(se_minimal,se_medium,se_large),
+  omit = c("tod_early_morning","tod_morning", "tod_midday","tod_afternoon", "tod_evening"),
+  header=FALSE,
+  title = "Estimated Regressions",
+  dep.var.caption  = "Output Variable: ln(Driver Pay)",
+  dep.var.labels   = "",
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  covariate.labels = c("Airport Pickup", "ln(Trip Duration)", "ln(Wait Duration)", "Congestion Zone", "Uber"),
+  add.lines = list(
+    c("Time of Day", "", "","\\checkmark"),
+    "\\hline"
+  ), 
+  omit.stat=c("adj.rsq","f"), 
+  digits=2,
+  notes.append = FALSE,
+  notes = "\\parbox[t]{7cm}{$HC_1$ robust standard errors in parentheses. Time of day is broken down into the following groups based on perceived high and low demand periods: early morning, morning, midday, afternoon, evening and late evening}"
+)
+```
+
+When examining airport pick-ups exclusively in the first model, the regression reveals that an airport pickup results in a 153% increase in driver pay. However, the $R^2$ value indicates that this variable alone only accounts for 7% of the variance in driver pay. The third model includes all the variables examined and accounts for 80% of the variance in driver pay. Here we see a decrease in the effect airport pick-ups have when accounting for additional variables, but that it still represents a 31% increase in driver pay. In addition, we estimate that a 1% increase in trip duration results in a 0.85% increase in driver pay. With the airports located approximately 30 minutes outside of the city, we can  see how this is also an important variable to describe the impact of airport pick-up trips. Additionally this data also confirms results from the earlier graph that Uber drivers make more than Lyft drivers with a 9.4% increase in driver pay for Uber drivers over Lyft.
+
+# Discussion
+## Statistical Limitations
+
+
+- **Heteroskedasticity:** Given that our model has a high degree of heteroskedasticity, we are using Heteroskedasticity-Consistent standard errors as a way of correcting this. The heteroskedasticity is likely being caused by the NYC-imposed minimum for hourly driver pay. This minimum is mostly enforced on short rides, making the driver pay more formulaic and linear. This means our model very accurately estimates the driver pay when driver pay is low for a trip but the estimate becomes less accurate as driver pay increases. See the scale-location plot of residuals in the appendix.
+
+
+- **Multicollinearity:** In our original model, trip distance and trip time were highly correlated, resulting in multicollinearity. We dropped distance from our model - time is much more likely to be important to drivers. See the appendix with a correlation matrix of all numeric variables.
+
+
+- **Independent Identically Distributed (IID):** Our data is only sampled from New York City, so it is not necessarily reflective of all rideshare drivers. In addition, our sample suffers from geographical clustering because drivers are operating in the same areas as each other. This causes some concern with our IID assumption as the actions of one driver are not totally independent of each other. A driver accepting a trip will affect the availability of trips for other drivers. And in the aggregate, drivers may affect trip pricing and therefore drivers’ pay.
+
+- **Normally Distributed Errors:** Originally, the distribution of residuals exhibited a Leptokurtic distribution with a long left tail. Upon review, we found that there were a small number (~50) trips with impossibly low driver pay given the trip time. For instance, the data reported making less than 20 cents on a trip over 30 minutes in duration. We removed the handful of erroneous trips and found the error distribution. We believe the remaining slight positive skew to the residuals is a product of the NYC driver pay minimums imposed on some trips. See the appendix for a histogram of our scaled residuals. 
+
+## Structural Limitations
+
+There are two variables omitted from the dataset that could have a material impact on the results of our analysis. First, we do not have any insight into costs incurred by the driver when completing trips (e.g. fuel, insurance, etc.). Given that a driver may earn more revenue from driving more, it is reasonable to assume that their costs increase as well. A more robust analysis would likely include some sort of cost metric to see how net and gross revenues vary by type of trip.
+
+Secondly, we do not have any detail on the type of vehicle used for each trip. Many rideshare services offer different tiers of ride options (e.g. Uber pool, Uber X, Uber XL, etc.) which charge different premiums for the exact same trip. Without this detail we could have two drivers with pickups and dropoffs from the same locations and times of day but receive different revenues.
+
+
+# Conclusion
+
+This study examined the impact airport pick-ups had on driver pay for High-Volume for Hire Vehicle (HVFHV), specifically Uber and Lyft, in New York City in order to determine if there was an increase in driver compensation versus standard trips. Our results indicate that all else held constant, airport trips result in a 31% increase in driver pay. Additionally, we found that increasing trip duration by 1% increases driver pay by 0.85%. We also noticed similar positive effects for whether the trip passed through a designated congestion zone, had an increased wait time, or occurred during a particular time of day. Finally, Uber drivers had a 9.4% increase in driver pay compared to Lyft drivers. 
+
+For further studies, we suggest also gathering data to account for additional costs the drivers face for different trips and the level of service provided by the rideshare company. These would help provide a more accurate picture of the revenue earned by drivers for different trips.
+
+
+
+
+
+
+\pagebreak
+# Appendix
+
+```{r correlation plot}
+# get different numerical columns for correlation matrix
+numeric_cols <- trips_confirm %>%
+                select(total_pay, 
+                       trip_time,
+                       trip_miles,
+                       wait_time,
+                       congestion_flag,
+                       uber) %>%
+                rename('Driver Pay' = total_pay, 
+                       'Trip Duration' = trip_time,
+                       'Trip Distance'= trip_miles,
+                       'Wait Duration' = wait_time,
+                       'Congestion Flag' = congestion_flag,
+                       'Uber Flag' = uber)
+            
+title <- "Correlation Between For-Hire Vehicle Fields"
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(cor(numeric_cols), method="color", col=col(200),  
+     diag=FALSE, 
+         type="upper", order="hclust", 
+     title=title, 
+         addCoef.col = "black", # Add coefficient of correlation
+         # hide correlation coefficient on the principal diagonal
+     mar=c(0,0,1,0)
+         )
+```
+
+
+```{r Test for heteroskedasticity}
+
+#bptest(m_large)
+# Definitely have heteroskedasticity according to BP test
+# The residuals plot below also has a strange pattern that I think is influenced by minimum driver pay levels set by NY State. 
+# This is causing a linear pattern in the plot of residuals as there is no driver pay lower than the threshold for low levels of driver pay.
+  # https://www.nyc.gov/site/tlc/about/driver-pay-rates.page
+  
+  
+# This can be caused b
+# We are using heteroskedastic standard errors to correct
+ resid_fitted = data.frame(m_large$residuals,m_large$fitted.values) %>%
+   rename(resid = m_large.residuals, fitted = m_large.fitted.values) %>%
+   mutate(resid_scaled = scale(resid))
+
+ p <- ggplot(resid_fitted, aes(x=fitted, y=resid_scaled)) +
+       geom_point(size=.1, color = "#3182bd", alpha = .5) +
+       ggtitle("Scale-Location Graph of Residuals") +
+       labs(x="Fitted Values",
+            y = "Scaled Residuals") +
+       theme_bw() +
+       theme(plot.title = element_text(hjust = 0.5))
+ p
+
+
+```
+
+
+```{r Test for multi-collinearity}
+
+# vif(m_large)
+#   # both ln_trip_miles and ln_trip_time had a VIF when they were in the model together over 5... and so did tod_morning. 
+#   # Now they are much better
+# 
+# cor(trips_small$ln_trip_miles, trips_small$ln_trip_time)
+#   # correlation is very high between those two .86
+# 
+# vif(m_medium)
+#   # now ln_trip_time is much better
+
+```
+
+
+```{r Test for normal errors}
+
+# qqnorm(m_large$residuals)
+# qqline(col = "blue", lwd = 2)
+
+
+#qqPlot(m_large$residuals)
+```
+
+
+
+```{r Test for normal errors 2}
+zs <- seq(-4, 4, 0.01)
+normal_density <- dnorm(seq(-4, 4, 0.01))
+
+hist_ <- function(x, ...){
+  hist(x, breaks = 60, xlab = "Scaled Residuals", ylab = "",  yaxt='n', freq = FALSE, ...)
+  lines(zs, normal_density, type = "l", col = "red", lwd = 2)
+}
+
+hist_(resid_fitted$resid_scaled, main = 'Histogram of Scaled Residuals')
+
+```
+
+
+```{r explore outliers}
+# resid_fitted$resid_scaled %>% kurtosis()
+# resid_fitted$resid_scaled %>% skewness()
+# 
+# m_test <- trips_confirm %>% filter(!(trip_time > 2 & driver_pay <=3)) %$% 
+#   lm(ln_total_pay ~ airport_pickup + ln_trip_time + ln_wait_time + uber + congestion_flag +
+#                   tod_early_morning + tod_morning + tod_midday + tod_afternoon + tod_evening)
+# 
+# 
+# qqPlot(m_test$residuals)
+# 
+# resid_t= data.frame(m_test$residuals) %>%
+#  rename(resid = m_test.residuals) %>%
+#  mutate(resid_scaled = scale(resid))
+# 
+#  
+#  hist_(resid_t$resid_scaled, main = 'Histogram of Scaled Residuals')
+#  
+#  resid_t$resid_scaled %>% skewness()
+#  
+#  resid_t$resid_scaled %>% kurtosis()
+```
+
+
+
+
+
